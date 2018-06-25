@@ -925,8 +925,8 @@ BRPaymentProtocolInvoiceRequest *BRPaymentProtocolInvoiceRequestNew(BRKey *sende
     
     array_new(ctx->defaults, invoice_req_signature + 1);
     array_set_count(ctx->defaults, invoice_req_signature + 1);
-    pkLen = BRKeyPubKey(senderPubKey, pk, sizeof(pk));
-    BRKeySetPubKey(&req->senderPubKey, pk, pkLen);
+    pkLen = MWKeyPubKey(senderPubKey, pk, sizeof(pk));
+    MWKeySetPubKey(&req->senderPubKey, pk, pkLen);
     req->amount = amount;
 
     if (! pkiType) {
@@ -964,7 +964,7 @@ BRPaymentProtocolInvoiceRequest *BRPaymentProtocolInvoiceRequestParse(const uint
         uint64_t i = 0, key = _ProtoBufField(&i, &data, buf, &dataLen, &off);
         
         switch (key >> 3) {
-            case invoice_req_sender_pk: gotSenderPK = BRKeySetPubKey(&req->senderPubKey, data, dataLen); break;
+            case invoice_req_sender_pk: gotSenderPK = MWKeySetPubKey(&req->senderPubKey, data, dataLen); break;
             case invoice_req_amount: req->amount = i, ctx->defaults[invoice_req_amount] = 0; break;
             case invoice_req_pki_type: _ProtoBufString(&req->pkiType, data, dataLen); break;
             case invoice_req_pki_data: req->pkiDataLen = _ProtoBufBytes(&req->pkiData, data, dataLen); break;
@@ -997,7 +997,7 @@ size_t BRPaymentProtocolInvoiceRequestSerialize(BRPaymentProtocolInvoiceRequest 
     
     assert(req != NULL);
     
-    pkLen = BRKeyPubKey(&req->senderPubKey, pk, sizeof(pk));
+    pkLen = MWKeyPubKey(&req->senderPubKey, pk, sizeof(pk));
     _ProtoBufSetBytes(buf, bufLen, pk, pkLen, invoice_req_sender_pk, &off);
     if (! ctx->defaults[invoice_req_amount]) _ProtoBufSetInt(buf, bufLen, req->amount, invoice_req_amount, &off);
     if (! ctx->defaults[invoice_req_pki_type]) _ProtoBufSetString(buf, bufLen, req->pkiType, invoice_req_pki_type,&off);
@@ -1048,21 +1048,21 @@ size_t BRPaymentProtocolInvoiceRequestDigest(BRPaymentProtocolInvoiceRequest *re
 {
     uint8_t *buf;
     size_t bufLen;
-    
+
     assert(req != NULL);
-    
+
     req->sigLen = 0; // set signature to 0 bytes, a signature can't sign itself
     bufLen = BRPaymentProtocolInvoiceRequestSerialize(req, NULL, 0);
     buf = malloc(bufLen);
     assert(buf != NULL);
     bufLen = BRPaymentProtocolInvoiceRequestSerialize(req, buf, bufLen);
-    
+
     if (req->pkiType && strncmp(req->pkiType, "x509+sha256", strlen("x509+sha256") + 1) == 0) {
         if (md && 256/8 <= mdLen) BRSHA256(md, buf, bufLen);
         bufLen = 256/8;
     }
     else bufLen = 0;
-    
+
     free(buf);
     if (req->signature) req->sigLen = array_count(req->signature);
     return (! md || bufLen <= mdLen) ? bufLen : 0;
@@ -1205,8 +1205,8 @@ static void _BRPaymentProtocolEncryptedMessageCEK(BRPaymentProtocolEncryptedMess
     uint8_t secret[32], seed[512/8], K[256/8], V[256/8], pk[65], rpk[65],
             nonce[] = { msg->nonce >> 56, msg->nonce >> 48, msg->nonce >> 40, msg->nonce >> 32,
                         msg->nonce >> 24, msg->nonce >> 16, msg->nonce >> 8, msg->nonce }; // convert to big endian
-    size_t pkLen = BRKeyPubKey(privKey, pk, sizeof(pk)),
-           rpkLen = BRKeyPubKey(&msg->receiverPubKey, rpk, sizeof(rpk));
+    size_t pkLen = MWKeyPubKey(privKey, pk, sizeof(pk)),
+           rpkLen = MWKeyPubKey(&msg->receiverPubKey, rpk, sizeof(rpk));
     BRKey *pubKey = (pkLen != rpkLen || memcmp(pk, rpk, pkLen) != 0) ? &msg->receiverPubKey : &msg->senderPubKey;
 
     _BRECDH(secret, privKey, pubKey);
@@ -1242,20 +1242,20 @@ BRPaymentProtocolEncryptedMessage *BRPaymentProtocolEncryptedMessageNew(BRPaymen
     assert(message != NULL || msgLen == 0);
     assert(receiverKey != NULL);
     assert(senderKey != NULL);
-    assert(BRKeyPrivKey(receiverKey, NULL, 0) != 0 || BRKeyPrivKey(senderKey, NULL, 0) != 0);
+    assert(MWKeyPrivKey(receiverKey, NULL, 0) != 0 || MWKeyPrivKey(senderKey, NULL, 0) != 0);
     
     array_new(ctx->defaults, encrypted_msg_status_msg + 1);
     array_set_count(ctx->defaults, encrypted_msg_status_msg + 1);
     msg->msgType = msgType;
-    pkLen = BRKeyPubKey(receiverKey, pk, sizeof(pk));
-    BRKeySetPubKey(&msg->receiverPubKey, pk, pkLen);
-    pkLen = BRKeyPubKey(senderKey, pk, sizeof(pk));
-    BRKeySetPubKey(&msg->senderPubKey, pk, pkLen);
+    pkLen = MWKeyPubKey(receiverKey, pk, sizeof(pk));
+    MWKeySetPubKey(&msg->receiverPubKey, pk, pkLen);
+    pkLen = MWKeyPubKey(senderKey, pk, sizeof(pk));
+    MWKeySetPubKey(&msg->senderPubKey, pk, pkLen);
     msg->nonce = nonce;
     if (identifier) msg->identLen = _ProtoBufBytes(&msg->identifier, identifier, identLen);
     msg->statusCode = statusCode;
     if (statusMsg) _ProtoBufString(&msg->statusMsg, statusMsg, strlen(statusMsg));
-    privKey = (BRKeyPrivKey(receiverKey, NULL, 0) != 0) ? receiverKey : senderKey;
+    privKey = (MWKeyPrivKey(receiverKey, NULL, 0) != 0) ? receiverKey : senderKey;
     _BRPaymentProtocolEncryptedMessageCEK(msg, cek, iv, privKey);
     snprintf(ad, adLen, "%"PRIu64"%s", statusCode, (statusMsg) ? statusMsg : "");
     bufLen = BRChacha20Poly1305AEADEncrypt(buf, bufLen, cek, iv, message, msgLen, ad, strlen(ad));
@@ -1309,8 +1309,8 @@ BRPaymentProtocolEncryptedMessage *BRPaymentProtocolEncryptedMessageParse(const 
         switch (key >> 3) {
             case encrypted_msg_msg_type: msg->msgType = (BRPaymentProtocolMessageType)i, gotMsgType = 1; break;
             case encrypted_msg_message: msg->msgLen = _ProtoBufBytes(&msg->message, data, dataLen); break;
-            case encrypted_msg_receiver_pk: gotReceiverPK = BRKeySetPubKey(&msg->receiverPubKey, data, dataLen); break;
-            case encrypted_msg_sender_pk: gotSenderPK = BRKeySetPubKey(&msg->senderPubKey, data, dataLen); break;
+            case encrypted_msg_receiver_pk: gotReceiverPK = MWKeySetPubKey(&msg->receiverPubKey, data, dataLen); break;
+            case encrypted_msg_sender_pk: gotSenderPK = MWKeySetPubKey(&msg->senderPubKey, data, dataLen); break;
             case encrypted_msg_nonce: msg->nonce = i, gotNonce = 1; break;
             case encrypted_msg_signature: msg->sigLen = _ProtoBufBytes(&msg->signature, data, dataLen); break;
             case encrypted_msg_identifier: msg->identLen = _ProtoBufBytes(&msg->identifier, data, dataLen); break;
@@ -1340,9 +1340,9 @@ size_t BRPaymentProtocolEncryptedMessageSerialize(BRPaymentProtocolEncryptedMess
     
     _ProtoBufSetInt(buf, bufLen, msg->msgType, encrypted_msg_msg_type, &off);
     _ProtoBufSetBytes(buf, bufLen, msg->message, msg->msgLen, encrypted_msg_message, &off);
-    pkLen = BRKeyPubKey(&msg->receiverPubKey, pubKey, sizeof(pubKey));
+    pkLen = MWKeyPubKey(&msg->receiverPubKey, pubKey, sizeof(pubKey));
     _ProtoBufSetBytes(buf, bufLen, pubKey, pkLen, encrypted_msg_receiver_pk, &off);
-    pkLen = BRKeyPubKey(&msg->senderPubKey, pubKey, sizeof(pubKey));
+    pkLen = MWKeyPubKey(&msg->senderPubKey, pubKey, sizeof(pubKey));
     _ProtoBufSetBytes(buf, bufLen, pubKey, pkLen, encrypted_msg_sender_pk, &off);
     _ProtoBufSetInt(buf, bufLen, msg->nonce, encrypted_msg_nonce, &off);
     if (msg->signature) _ProtoBufSetBytes(buf, bufLen, msg->signature, msg->sigLen, encrypted_msg_signature, &off);

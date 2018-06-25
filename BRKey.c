@@ -30,7 +30,7 @@
 #include <assert.h>
 #include <pthread.h>
 
-#define BITCOIN_PRIVKEY      52
+#define BITCOIN_PRIVKEY      128
 #define BITCOIN_PRIVKEY_TEST 239
 
 #if __BIG_ENDIAN__ || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__) ||\
@@ -48,7 +48,7 @@
 #pragma clang diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma clang diagnostic ignored "-Wconditional-uninitialized"
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+//#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #include "secp256k1/src/basic-config.h"
 #include "secp256k1/src/secp256k1.c"
 #pragma clang diagnostic pop
@@ -62,6 +62,8 @@ static void _ctx_init()
     _ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
 }
 
+// used in the creation of the private child key derivation
+//
 // adds 256bit big endian ints a and b (mod secp256k1 order) and stores the result in a
 // returns true on success
 int BRSecp256k1ModAdd(UInt256 *a, const UInt256 *b)
@@ -70,6 +72,8 @@ int BRSecp256k1ModAdd(UInt256 *a, const UInt256 *b)
     return secp256k1_ec_privkey_tweak_add(_ctx, (unsigned char *)a, (const unsigned char *)b);
 }
 
+// only used in BIP38 implementation - Maxcoin Wallet doesn't use BIP38
+//
 // multiplies 256bit big endian ints a and b (mod secp256k1 order) and stores the result in a
 // returns true on success
 int BRSecp256k1ModMul(UInt256 *a, const UInt256 *b)
@@ -78,6 +82,8 @@ int BRSecp256k1ModMul(UInt256 *a, const UInt256 *b)
     return secp256k1_ec_privkey_tweak_mul(_ctx, (unsigned char *)a, (const unsigned char *)b);
 }
 
+// used to create a non-hardened child private key
+//
 // multiplies secp256k1 generator by 256bit big endian int i and stores the result in p
 // returns true on success
 int BRSecp256k1PointGen(BRECPoint *p, const UInt256 *i)
@@ -90,6 +96,8 @@ int BRSecp256k1PointGen(BRECPoint *p, const UInt256 *i)
             secp256k1_ec_pubkey_serialize(_ctx, (unsigned char *)p, &pLen, &pubkey, SECP256K1_EC_COMPRESSED));
 }
 
+// used in the public child key derivation
+//
 // multiplies secp256k1 generator by 256bit big endian int i and adds the result to ec-point p
 // returns true on success
 int BRSecp256k1PointAdd(BRECPoint *p, const UInt256 *i)
@@ -103,6 +111,8 @@ int BRSecp256k1PointAdd(BRECPoint *p, const UInt256 *i)
             secp256k1_ec_pubkey_serialize(_ctx, (unsigned char *)p, &pLen, &pubkey, SECP256K1_EC_COMPRESSED));
 }
 
+// used in the payment protocol
+//
 // multiplies secp256k1 ec-point p by 256bit big endian int i and stores the result in p
 // returns true on success
 int BRSecp256k1PointMul(BRECPoint *p, const UInt256 *i)
@@ -151,6 +161,40 @@ int BRPrivKeyIsValid(const char *privKey)
     return r;
 }
 
+// Maxcoin Wallet version
+int MWPrivKeyIsValid(const char *privKey)
+{
+    uint8_t data[34];
+    size_t dataLen, strLen;
+    int r = 0;
+    
+    assert(privKey != NULL);
+    
+    dataLen = BRBase58CheckDecode(data, sizeof(data), privKey);
+    strLen = strlen(privKey);
+    
+    if (dataLen == 33 || dataLen == 34) { // wallet import format: https://en.bitcoin.it/wiki/Wallet_import_format
+#if BITCOIN_TESTNET
+        r = (data[0] == BITCOIN_PRIVKEY_TEST);
+#else
+        r = (data[0] == BITCOIN_PRIVKEY);
+#endif
+    }
+    else if ((strLen == 30 || strLen == 22) && privKey[0] == 'S') { // mini private key format
+        char s[strLen + 2];
+        
+        strncpy(s, privKey, sizeof(s));
+        s[sizeof(s) - 2] = '?';
+        BRSHA256(data, s, sizeof(s) - 1);
+        mem_clean(s, sizeof(s));
+        r = (data[0] == 0);
+    }
+    else r = (strspn(privKey, "0123456789ABCDEFabcdef") == 64); // hex encoded key
+    
+    mem_clean(data, sizeof(data));
+    return r;
+}
+
 // assigns secret to key and returns true on success
 int BRKeySetSecret(BRKey *key, const UInt256 *secret, int compressed)
 {
@@ -164,6 +208,18 @@ int BRKeySetSecret(BRKey *key, const UInt256 *secret, int compressed)
     return secp256k1_ec_seckey_verify(_ctx, key->secret.u8);
 }
 
+// Maxcoin Wallet version
+int MWKeySetSecret(BRKey *key, const UInt256 *secret, int compressed)
+{
+    assert(key != NULL);
+    assert(secret != NULL);
+    
+    BRKeyClean(key);
+    key->secret = UInt256Get(secret);
+    key->compressed = compressed;
+    return 1; // TODO - call an isvalid function in SchnorrCPP to make sure
+}
+
 // assigns privKey to key and returns true on success
 // privKey must be wallet import format (WIF), mini private key format, or hex string
 int BRKeySetPrivKey(BRKey *key, const char *privKey)
@@ -175,7 +231,7 @@ int BRKeySetPrivKey(BRKey *key, const char *privKey)
 #if BITCOIN_TESTNET
     version = BITCOIN_PRIVKEY_TEST;
 #endif
-
+    
     assert(key != NULL);
     assert(privKey != NULL);
     
@@ -188,13 +244,13 @@ int BRKeySetPrivKey(BRKey *key, const char *privKey)
     else {
         len = BRBase58CheckDecode(data, sizeof(data), privKey);
         if (len == 0 || len == 28) len = BRBase58Decode(data, sizeof(data), privKey);
-
+        
         if (len < sizeof(UInt256) || len > sizeof(UInt256) + 2) { // treat as hex string
             for (len = 0; privKey[len*2] && privKey[len*2 + 1] && len < sizeof(data); len++) {
                 if (sscanf(&privKey[len*2], "%2hhx", &data[len]) != 1) break;
             }
         }
-
+        
         if ((len == sizeof(UInt256) + 1 || len == sizeof(UInt256) + 2) && data[0] == version) {
             r = BRKeySetSecret(key, (UInt256 *)&data[1], (len == sizeof(UInt256) + 2));
         }
@@ -202,7 +258,49 @@ int BRKeySetPrivKey(BRKey *key, const char *privKey)
             r = BRKeySetSecret(key, (UInt256 *)data, 0);
         }
     }
+    
+    mem_clean(data, sizeof(data));
+    return r;
+}
 
+// Maxcoin Wallet version
+int MWKeySetPrivKey(BRKey *key, const char *privKey)
+{
+    size_t len = strlen(privKey);
+    uint8_t data[34], version = BITCOIN_PRIVKEY;
+    int r = 0;
+    
+#if BITCOIN_TESTNET
+    version = BITCOIN_PRIVKEY_TEST;
+#endif
+    
+    assert(key != NULL);
+    assert(privKey != NULL);
+    
+    // mini private key format
+    if ((len == 30 || len == 22) && privKey[0] == 'S') {
+        if (! MWPrivKeyIsValid(privKey)) return 0;
+        BRSHA256(data, privKey, strlen(privKey));
+        r = MWKeySetSecret(key, (UInt256 *)data, 0);
+    }
+    else {
+        len = BRBase58CheckDecode(data, sizeof(data), privKey);
+        if (len == 0 || len == 28) len = BRBase58Decode(data, sizeof(data), privKey);
+        
+        if (len < sizeof(UInt256) || len > sizeof(UInt256) + 2) { // treat as hex string
+            for (len = 0; privKey[len*2] && privKey[len*2 + 1] && len < sizeof(data); len++) {
+                if (sscanf(&privKey[len*2], "%2hhx", &data[len]) != 1) break;
+            }
+        }
+        
+        if ((len == sizeof(UInt256) + 1 || len == sizeof(UInt256) + 2) && data[0] == version) {
+            r = MWKeySetSecret(key, (UInt256 *)&data[1], (len == sizeof(UInt256) + 2));
+        }
+        else if (len == sizeof(UInt256)) {
+            r = MWKeySetSecret(key, (UInt256 *)data, 0);
+        }
+    }
+    
     mem_clean(data, sizeof(data));
     return r;
 }
@@ -221,6 +319,19 @@ int BRKeySetPubKey(BRKey *key, const uint8_t *pubKey, size_t pkLen)
     memcpy(key->pubKey, pubKey, pkLen);
     key->compressed = (pkLen <= 33);
     return secp256k1_ec_pubkey_parse(_ctx, &pk, key->pubKey, pkLen);
+}
+
+// Maxcoin Wallet version
+int MWKeySetPubKey(BRKey *key, const uint8_t *pubKey, size_t pkLen)
+{
+    assert(key != NULL);
+    assert(pubKey != NULL);
+    assert(pkLen == 33 || pkLen == 65);
+    
+    BRKeyClean(key);
+    memcpy(key->pubKey, pubKey, pkLen);
+    key->compressed = (pkLen <= 33);
+    return 1;
 }
 
 // writes the WIF private key to privKey and returns the number of bytes writen, or pkLen needed if privKey is NULL
@@ -247,6 +358,50 @@ size_t BRKeyPrivKey(const BRKey *key, char *privKey, size_t pkLen)
     return pkLen;
 }
 
+// Maxcoin Wallet version
+size_t MWKeyPrivKey(const BRKey *key, char *privKey, size_t pkLen)
+{
+    uint8_t data[34];
+    
+    assert(key != NULL);
+    
+    data[0] = BITCOIN_PRIVKEY;
+#if BITCOIN_TESTNET
+    data[0] = BITCOIN_PRIVKEY_TEST;
+#endif
+    
+    UInt256Set(&data[1], key->secret);
+    if (key->compressed) data[33] = 0x01;
+    pkLen = BRBase58CheckEncode(privKey, pkLen, data, (key->compressed) ? 34 : 33);
+    mem_clean(data, sizeof(data));
+
+    return pkLen;
+}
+
+int MWKeySetPrivKeyBytes(BRKey *key, const uint8_t *privKey, size_t pkLen)
+{
+    assert(key != NULL);
+    assert(privKey != NULL);
+    assert(pkLen == 32);
+    
+    BRKeyClean(key);
+    memcpy(key->secret.u8, privKey, pkLen);
+    
+    key->compressed = 0;
+    return 1;
+}
+
+size_t MWKeyPrivKeyCopy(BRKey *key, void *privKey)
+{
+    assert(key != NULL);
+    
+    const int privByteLength = 32;
+    
+    if (privKey) memcpy(privKey, key->secret.u8, privByteLength);
+ 
+    return privByteLength;
+}
+
 // writes the DER encoded public key to pubKey and returns number of bytes written, or pkLen needed if pubKey is NULL
 size_t BRKeyPubKey(BRKey *key, void *pubKey, size_t pkLen)
 {
@@ -268,6 +423,37 @@ size_t BRKeyPubKey(BRKey *key, void *pubKey, size_t pkLen)
     return (! pubKey || size <= pkLen) ? size : 0;
 }
 
+// Maxcoin Wallet version
+size_t MWKeyPubKey(BRKey *key, void *pubKey, size_t pkLen)
+{
+    static uint8_t empty[65]; // static vars initialize to zero
+    size_t size = (key->compressed) ? 33 : 65;
+
+    assert(key != NULL);
+    
+    if (memcmp(key->pubKey, empty, size) == 0) {
+        uint8_t pubKey[size];
+        size_t pkLen2;
+        _BRBIP32PublicKeyFromSecret(&(key->secret), &pkLen2, pubKey);
+        memcpy(key->pubKey, pubKey, pkLen2);
+        key->compressed = (pkLen2 <= 33);
+    }
+    
+    if (pubKey && size <= pkLen) memcpy(pubKey, key->pubKey, size);
+    return (! pubKey || size <= pkLen) ? size : 0;
+}
+
+size_t MWKeyPubKeyCopy(BRKey *key, void *pubKey, size_t pkLen)
+{
+    size_t size = (key->compressed) ? 33 : 65;
+    
+    assert(key != NULL);
+    
+    if (pubKey && size <= pkLen) memcpy(pubKey, key->pubKey, size);
+
+    return (! pubKey || size <= pkLen) ? size : 0;
+}
+
 // returns the ripemd160 hash of the sha256 hash of the public key
 UInt160 BRKeyHash160(BRKey *key)
 {
@@ -278,6 +464,18 @@ UInt160 BRKeyHash160(BRKey *key)
     assert(key != NULL);
     len = BRKeyPubKey(key, NULL, 0);
     if (len > 0 && secp256k1_ec_pubkey_parse(_ctx, &pk, key->pubKey, len)) BRHash160(&hash, key->pubKey, len);
+    return hash;
+}
+
+// Maxcoin Wallet version
+UInt160 MWKeyHash160(BRKey *key)
+{
+    UInt160 hash = UINT160_ZERO;
+    size_t len;
+    
+    assert(key != NULL);
+    len = (key->compressed) ? 33 : 65;
+    BRHash160(&hash, key->pubKey, len);
     return hash;
 }
 
@@ -305,6 +503,36 @@ size_t BRKeyAddress(BRKey *key, char *addr, size_t addrLen)
     return addrLen;
 }
 
+// Maxcoin Wallet version
+size_t MWKeyAddress(BRKey *key, char *addr, size_t addrLen)
+{
+    UInt160 hash;
+    uint8_t data[21];
+    uint8_t keccak[32];
+    uint8_t dataCheck[25];
+    
+    assert(key != NULL);
+    
+    hash = MWKeyHash160(key);
+    data[0] = BITCOIN_PUBKEY_ADDRESS;
+#if BITCOIN_TESTNET
+    data[0] = BITCOIN_PUBKEY_ADDRESS_TEST;
+#endif
+    UInt160Set(&data[1], hash);
+    
+    if (! UInt160IsZero(hash)) {
+        
+        MWKeccak256(keccak, data, sizeof(data));
+        memcpy(dataCheck, data, sizeof(data));
+        memcpy(&dataCheck[sizeof(data)], keccak, 4);
+        
+        addrLen = BRBase58Encode(addr, addrLen, dataCheck, sizeof(dataCheck));
+    }
+    else addrLen = 0;
+    
+    return addrLen;
+}
+
 // signs md with key and writes signature to sig
 // returns the number of bytes written, or sigLen needed if sig is NULL
 // returns 0 on failure
@@ -318,6 +546,19 @@ size_t BRKeySign(const BRKey *key, void *sig, size_t sigLen, UInt256 md)
         if (! secp256k1_ecdsa_signature_serialize_der(_ctx, sig, &sigLen, &s)) sigLen = 0;
     }
     else sigLen = 0;
+    
+    return sigLen;
+}
+
+// Maxcoin Wallet version
+size_t MWKeySign(const BRKey *key, void *sig, size_t sigLen, UInt256 md)
+{
+    assert(key != NULL);
+
+    uint8_t mdSigned[sigLen];
+    UInt256 secret = key->secret;
+    _BRTransactionSign(&secret, &md, mdSigned);
+    memcpy(sig, mdSigned, sigLen);
     
     return sigLen;
 }
@@ -340,6 +581,23 @@ int BRKeyVerify(BRKey *key, UInt256 md, const void *sig, size_t sigLen)
         secp256k1_ecdsa_signature_parse_der(_ctx, &s, sig, sigLen)) {
         if (secp256k1_ecdsa_verify(_ctx, &s, md.u8, &pk) == 1) r = 1; // success is 1, all other values are fail
     }
+    
+    return r;
+}
+
+// Maxcoin Wallet version
+int MWKeyVerify(BRKey *key, UInt256 md, unsigned char *sig, size_t sigLen)
+{
+    size_t len;
+    int r = 0;
+    
+    assert(key != NULL);
+    assert(sig != NULL || sigLen == 0);
+    assert(sigLen > 0);
+    
+    len = MWKeyPubKey(key, NULL, 0);
+
+    r = _BRTransactionVerify(key->pubKey, &len, &md, sig, &sigLen);
     
     return r;
 }
@@ -402,3 +660,6 @@ int BRKeyRecoverPubKey(BRKey *key, UInt256 md, const void *compactSig, size_t si
 
     return r;
 }
+
+
+

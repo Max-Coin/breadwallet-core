@@ -71,6 +71,38 @@ static void _CKDpriv(UInt256 *k, UInt256 *c, uint32_t i)
     mem_clean(buf, sizeof(buf));
 }
 
+static void _MWCKDpriv(UInt256 *k, UInt256 *c, uint32_t i)
+{
+    uint8_t buf[sizeof(BRECPoint) + sizeof(i)];
+    uint8_t privKey[32];
+    UInt512 I;
+    
+    if (i & BIP32_HARD) {
+        buf[0] = 0;
+        UInt256Set(&buf[1], *k);
+    }
+    else
+    {
+        uint8_t pubKey[33];
+        size_t pkLen;
+
+        _BRBIP32PublicKeyFromSecret(k, &pkLen, pubKey);
+        memcpy(buf, pubKey, pkLen);
+    }
+    
+    UInt32SetBE(&buf[sizeof(BRECPoint)], i);
+    
+    BRHMAC(&I, BRSHA512, sizeof(UInt512), c, sizeof(*c), buf, sizeof(buf)); // I = HMAC-SHA512(c, k|P(k) || i)
+    
+    _BIP32DeriveChildPrivateKey(k, (UInt256 *)&I, privKey); // k = IL + k (mod n)
+    memcpy((*k).u8, privKey, 32);
+    
+    *c = *(UInt256 *)&I.u8[sizeof(UInt256)]; // c = IR
+    
+    var_clean(&I);
+    mem_clean(buf, sizeof(buf));
+}
+
 // Public parent key -> public child key
 //
 // CKDpub((Kpar, cpar), i) -> (Ki, ci) computes a child extended public key from the parent extended public key.
@@ -98,6 +130,29 @@ static void _CKDpub(BRECPoint *K, UInt256 *c, uint32_t i)
         
         *c = *(UInt256 *)&I.u8[sizeof(UInt256)]; // c = IR
         BRSecp256k1PointAdd(K, (UInt256 *)&I); // K = P(IL) + K
+
+        var_clean(&I);
+        mem_clean(buf, sizeof(buf));
+    }
+}
+
+static void _MWCKDpub(BRECPoint *K, UInt256 *c, uint32_t i)
+{
+    uint8_t buf[sizeof(*K) + sizeof(i)];
+    UInt512 I;
+    
+    if ((i & BIP32_HARD) != BIP32_HARD) { // can't derive private child key from public parent key
+        *(BRECPoint *)buf = *K;
+        UInt32SetBE(&buf[sizeof(*K)], i);
+        
+        BRHMAC(&I, BRSHA512, sizeof(UInt512), c, sizeof(*c), buf, sizeof(buf)); // I = HMAC-SHA512(c, P(K) || i)
+        
+        *c = *(UInt256 *)&I.u8[sizeof(UInt256)]; // c = IR
+        
+        size_t pkLen = sizeof(*K);
+        uint8_t pubKey[pkLen];
+        _BIP32DeriveChildPublicKey((unsigned char *)K, &pkLen, (UInt256 *)&I, pubKey);
+        memcpy(K, pubKey, pkLen);
 
         var_clean(&I);
         mem_clean(buf, sizeof(buf));
@@ -135,6 +190,43 @@ BRMasterPubKey BRBIP32MasterPubKey(const void *seed, size_t seedLen)
     return mpk;
 }
 
+// Maxcoin Wallet version
+BRMasterPubKey MWBIP32MasterPubKey(const void *seed, size_t seedLen)
+{
+    BRMasterPubKey mpk = BR_MASTER_PUBKEY_NONE;
+    UInt512 I;
+    UInt256 secret, chain;
+    BRKey key;
+    
+    assert(seed != NULL || seedLen == 0);
+    
+    if (seed || seedLen == 0) {
+        BRHMAC(&I, BRSHA512, sizeof(UInt512), BIP32_SEED_KEY, strlen(BIP32_SEED_KEY), seed, seedLen);
+        secret = *(UInt256 *)&I;
+        chain = *(UInt256 *)&I.u8[sizeof(UInt256)];
+        var_clean(&I);
+        
+        MWKeySetSecret(&key, &secret, 1);
+        mpk.fingerPrint = MWKeyHash160(&key).u32[0];
+        
+        _MWCKDpriv(&secret, &chain, 0 | BIP32_HARD); // path m/0H
+        
+        mpk.chainCode = chain;
+
+        MWKeySetSecret(&key, &secret, 1);
+        var_clean(&secret, &chain);
+
+        uint8_t pubKey[33];
+        size_t pkLen;
+        _BRBIP32PublicKeyFromSecret(&(key.secret), &pkLen, pubKey);
+        memcpy(mpk.pubKey, pubKey, pkLen); // path N(m/0H)
+
+        BRKeyClean(&key);
+    }
+    
+    return mpk;
+}
+
 // writes the public key for path N(m/0H/chain/index) to pubKey
 // returns number of bytes written, or pubKeyLen needed if pubKey is NULL
 size_t BRBIP32PubKey(uint8_t *pubKey, size_t pubKeyLen, BRMasterPubKey mpk, uint32_t chain, uint32_t index)
@@ -154,10 +246,34 @@ size_t BRBIP32PubKey(uint8_t *pubKey, size_t pubKeyLen, BRMasterPubKey mpk, uint
     return (! pubKey || sizeof(BRECPoint) <= pubKeyLen) ? sizeof(BRECPoint) : 0;
 }
 
+// Maxcoin Wallet version
+size_t MWBIP32PubKey(uint8_t *pubKey, size_t pubKeyLen, BRMasterPubKey mpk, uint32_t chain, uint32_t index)
+{
+    UInt256 chainCode = mpk.chainCode;
+    
+    assert(memcmp(&mpk, &BR_MASTER_PUBKEY_NONE, sizeof(mpk)) != 0);
+    
+    if (pubKey && sizeof(BRECPoint) <= pubKeyLen) {
+        *(BRECPoint *)pubKey = *(BRECPoint *)mpk.pubKey;
+        
+        _MWCKDpub((BRECPoint *)pubKey, &chainCode, chain); // path N(m/0H/chain)
+        _MWCKDpub((BRECPoint *)pubKey, &chainCode, index); // index'th key in chain
+        var_clean(&chainCode);
+    }
+    
+    return (! pubKey || sizeof(BRECPoint) <= pubKeyLen) ? sizeof(BRECPoint) : 0;
+}
+
 // sets the private key for path m/0H/chain/index to key
 void BRBIP32PrivKey(BRKey *key, const void *seed, size_t seedLen, uint32_t chain, uint32_t index)
 {
     BRBIP32PrivKeyPath(key, seed, seedLen, 3, 0 | BIP32_HARD, chain, index);
+}
+
+// Maxcoin Wallet version
+void MWBIP32PrivKey(BRKey *key, const void *seed, size_t seedLen, uint32_t chain, uint32_t index)
+{
+    MWBIP32PrivKeyPath(key, seed, seedLen, 3, 0 | BIP32_HARD, chain, index);
 }
 
 // sets the private key for path m/0H/chain/index to each element in keys
@@ -191,6 +307,36 @@ void BRBIP32PrivKeyList(BRKey keys[], size_t keysCount, const void *seed, size_t
     }
 }
 
+// Maxcoin Wallet version
+void MWBIP32PrivKeyList(BRKey keys[], size_t keysCount, const void *seed, size_t seedLen, uint32_t chain, const uint32_t indexes[])
+{
+    UInt512 I;
+    UInt256 secret, chainCode, s, c;
+    
+    assert(keys != NULL || keysCount == 0);
+    assert(seed != NULL || seedLen == 0);
+    assert(indexes != NULL || keysCount == 0);
+    
+    if (keys && keysCount > 0 && (seed || seedLen == 0) && indexes) {
+        BRHMAC(&I, BRSHA512, sizeof(UInt512), BIP32_SEED_KEY, strlen(BIP32_SEED_KEY), seed, seedLen);
+        secret = *(UInt256 *)&I;
+        chainCode = *(UInt256 *)&I.u8[sizeof(UInt256)];
+        var_clean(&I);
+        
+        _MWCKDpriv(&secret, &chainCode, 0 | BIP32_HARD); // path m/0H
+        _MWCKDpriv(&secret, &chainCode, chain); // path m/0H/chain
+        
+        for (size_t i = 0; i < keysCount; i++) {
+            s = secret;
+            c = chainCode;
+            _MWCKDpriv(&s, &c, indexes[i]); // index'th key in chain
+            MWKeySetSecret(&keys[i], &s, 1);
+        }
+        
+        var_clean(&secret, &chainCode, &c, &s);
+    }
+}
+
 // sets the private key for the specified path to key
 // depth is the number of arguments used to specify the path
 void BRBIP32PrivKeyPath(BRKey *key, const void *seed, size_t seedLen, int depth, ...)
@@ -199,6 +345,16 @@ void BRBIP32PrivKeyPath(BRKey *key, const void *seed, size_t seedLen, int depth,
 
     va_start(ap, depth);
     BRBIP32vPrivKeyPath(key, seed, seedLen, depth, ap);
+    va_end(ap);
+}
+
+// Maxcoin Wallet version
+void MWBIP32PrivKeyPath(BRKey *key, const void *seed, size_t seedLen, int depth, ...)
+{
+    va_list ap;
+    
+    va_start(ap, depth);
+    MWBIP32vPrivKeyPath(key, seed, seedLen, depth, ap);
     va_end(ap);
 }
 
@@ -224,6 +380,31 @@ void BRBIP32vPrivKeyPath(BRKey *key, const void *seed, size_t seedLen, int depth
         }
         
         BRKeySetSecret(key, &secret, 1);
+        var_clean(&secret, &chainCode);
+    }
+}
+
+// Maxcoin Wallet version
+void MWBIP32vPrivKeyPath(BRKey *key, const void *seed, size_t seedLen, int depth, va_list vlist)
+{
+    UInt512 I;
+    UInt256 secret, chainCode;
+    
+    assert(key != NULL);
+    assert(seed != NULL || seedLen == 0);
+    assert(depth >= 0);
+    
+    if (key && (seed || seedLen == 0)) {
+        BRHMAC(&I, BRSHA512, sizeof(UInt512), BIP32_SEED_KEY, strlen(BIP32_SEED_KEY), seed, seedLen);
+        secret = *(UInt256 *)&I;
+        chainCode = *(UInt256 *)&I.u8[sizeof(UInt256)];
+        var_clean(&I);
+        
+        for (int i = 0; i < depth; i++) {
+            _MWCKDpriv(&secret, &chainCode, va_arg(vlist, uint32_t));
+        }
+        
+        MWKeySetSecret(key, &secret, 1);
         var_clean(&secret, &chainCode);
     }
 }
@@ -265,6 +446,12 @@ void BRBIP32APIAuthKey(BRKey *key, const void *seed, size_t seedLen)
     BRBIP32PrivKeyPath(key, seed, seedLen, 2, 1 | BIP32_HARD, 0);
 }
 
+// Maxcoin Wallet version
+void MWBIP32APIAuthKey(BRKey *key, const void *seed, size_t seedLen)
+{
+    BRBIP32PrivKeyPath(key, seed, seedLen, 2, 1 | BIP32_HARD, 0);
+}
+
 // key used for BitID: https://github.com/bitid/bitid/blob/master/BIP_draft.md
 void BRBIP32BitIDKey(BRKey *key, const void *seed, size_t seedLen, uint32_t index, const char *uri)
 {
@@ -281,6 +468,27 @@ void BRBIP32BitIDKey(BRKey *key, const void *seed, size_t seedLen, uint32_t inde
         memcpy(&data[sizeof(index)], uri, uriLen);
         BRSHA256(&hash, data, sizeof(data));
         BRBIP32PrivKeyPath(key, seed, seedLen, 5, 13 | BIP32_HARD, UInt32GetLE(&hash.u32[0]) | BIP32_HARD,
+                           UInt32GetLE(&hash.u32[1]) | BIP32_HARD, UInt32GetLE(&hash.u32[2]) | BIP32_HARD,
+                           UInt32GetLE(&hash.u32[3]) | BIP32_HARD); // path m/13H/aH/bH/cH/dH
+    }
+}
+
+// Maxcoin Wallet version
+void MWBIP32BitIDKey(BRKey *key, const void *seed, size_t seedLen, uint32_t index, const char *uri)
+{
+    assert(key != NULL);
+    assert(seed != NULL || seedLen == 0);
+    assert(uri != NULL);
+    
+    if (key && (seed || seedLen == 0) && uri) {
+        UInt256 hash;
+        size_t uriLen = strlen(uri);
+        uint8_t data[sizeof(index) + uriLen];
+        
+        UInt32SetLE(data, index);
+        memcpy(&data[sizeof(index)], uri, uriLen);
+        BRSHA256(&hash, data, sizeof(data));
+        MWBIP32PrivKeyPath(key, seed, seedLen, 5, 13 | BIP32_HARD, UInt32GetLE(&hash.u32[0]) | BIP32_HARD,
                            UInt32GetLE(&hash.u32[1]) | BIP32_HARD, UInt32GetLE(&hash.u32[2]) | BIP32_HARD,
                            UInt32GetLE(&hash.u32[3]) | BIP32_HARD); // path m/13H/aH/bH/cH/dH
     }

@@ -90,7 +90,7 @@ void BR__keccakf__internal(uint64_t st[25], int rounds)
     }
 }
 
-int BRKeccak256(uint8_t *hash, const uint8_t *in, int inlen)
+int MWKeccak256(uint8_t *hash, const uint8_t *in, size_t inlen)
 {
     uint64_t st[25];
     uint8_t temp[144];

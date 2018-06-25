@@ -51,8 +51,8 @@ struct BRWalletStruct {
 
 inline static uint64_t _txFee(uint64_t feePerKb, size_t size)
 {
-    uint64_t standardFee = ((size + 999)/1000)*TX_FEE_PER_KB, // standard fee based on tx size rounded up to nearest kb
-             fee = (((size*feePerKb/1000) + 99)/100)*100; // fee using feePerKb, rounded up to nearest 100 satoshi
+    uint64_t standardFee = TX_MIN_FEE, // standard fee based on tx size rounded up to nearest kb
+             fee = 0;//(((size*feePerKb/1000) + 99)/100)*100; // fee using feePerKb, rounded up to nearest 100 satoshi
     
     return (fee > standardFee) ? fee : standardFee;
 }
@@ -337,11 +337,11 @@ size_t BRWalletUnusedAddrs(BRWallet *wallet, BRAddress addrs[], uint32_t gapLimi
     while (i + gapLimit > count) { // generate new addresses up to gapLimit
         BRKey key;
         BRAddress address = BR_ADDRESS_NONE;
-        uint8_t pubKey[BRBIP32PubKey(NULL, 0, wallet->masterPubKey, chain, count)];
-        size_t len = BRBIP32PubKey(pubKey, sizeof(pubKey), wallet->masterPubKey, chain, (uint32_t)count);
+        uint8_t pubKey[MWBIP32PubKey(NULL, 0, wallet->masterPubKey, chain, count)];
+        size_t len = MWBIP32PubKey(pubKey, sizeof(pubKey), wallet->masterPubKey, chain, (uint32_t)count);
         
-        if (! BRKeySetPubKey(&key, pubKey, len)) break;
-        if (! BRKeyAddress(&key, address.s, sizeof(address)) || BRAddressEq(&address, &BR_ADDRESS_NONE)) break;
+        if (! MWKeySetPubKey(&key, pubKey, len)) break;
+        if (! MWKeyAddress(&key, address.s, sizeof(address)) || BRAddressEq(&address, &BR_ADDRESS_NONE)) break;
         array_add(addrChain, address);
         count++;
         if (BRSetContains(wallet->usedAddrs, &address)) i = count;
@@ -642,7 +642,7 @@ BRTransaction *BRWalletCreateTxForOutputs(BRWallet *wallet, const BRTxOutput out
         BRTransactionFree(transaction);
         transaction = NULL;
     }
-    else if (transaction && balance - (amount + feeAmount) >= minAmount) { // add change output
+    else if (transaction && balance - (amount + feeAmount) > minAmount) { // add change output
         BRWalletUnusedAddrs(wallet, &addr, 1, 1);
         uint8_t script[BRAddressScriptPubKey(NULL, 0, addr.s)];
         size_t scriptLen = BRAddressScriptPubKey(script, sizeof(script), addr.s);
@@ -685,6 +685,44 @@ int BRWalletSignTransaction(BRWallet *wallet, BRTransaction *tx, int forkId, con
     if (seed) {
         BRBIP32PrivKeyList(keys, internalCount, seed, seedLen, SEQUENCE_INTERNAL_CHAIN, internalIdx);
         BRBIP32PrivKeyList(&keys[internalCount], externalCount, seed, seedLen, SEQUENCE_EXTERNAL_CHAIN, externalIdx);
+        // TODO: XXX wipe seed callback
+        seed = NULL;
+        if (tx) r = BRTransactionSign(tx, forkId, keys, internalCount + externalCount);
+        for (i = 0; i < internalCount + externalCount; i++) BRKeyClean(&keys[i]);
+    }
+    else r = -1; // user canceled authentication
+    
+    return r;
+}
+
+// Maxcoin Wallet version
+int MWWalletSignTransaction(BRWallet *wallet, BRTransaction *tx, int forkId, const void *seed, size_t seedLen)
+{
+    uint32_t j, internalIdx[tx->inCount], externalIdx[tx->inCount];
+    size_t i, internalCount = 0, externalCount = 0;
+    int r = 0;
+    
+    assert(wallet != NULL);
+    assert(tx != NULL);
+    pthread_mutex_lock(&wallet->lock);
+    
+    for (i = 0; tx && i < tx->inCount; i++) {
+        for (j = (uint32_t)array_count(wallet->internalChain); j > 0; j--) {
+            if (BRAddressEq(tx->inputs[i].address, &wallet->internalChain[j - 1])) internalIdx[internalCount++] = j - 1;
+        }
+        
+        for (j = (uint32_t)array_count(wallet->externalChain); j > 0; j--) {
+            if (BRAddressEq(tx->inputs[i].address, &wallet->externalChain[j - 1])) externalIdx[externalCount++] = j - 1;
+        }
+    }
+    
+    pthread_mutex_unlock(&wallet->lock);
+    
+    BRKey keys[internalCount + externalCount];
+    
+    if (seed) {
+        MWBIP32PrivKeyList(keys, internalCount, seed, seedLen, SEQUENCE_INTERNAL_CHAIN, internalIdx);
+        MWBIP32PrivKeyList(&keys[internalCount], externalCount, seed, seedLen, SEQUENCE_EXTERNAL_CHAIN, externalIdx);
         // TODO: XXX wipe seed callback
         seed = NULL;
         if (tx) r = BRTransactionSign(tx, forkId, keys, internalCount + externalCount);
@@ -935,7 +973,7 @@ void BRWalletUpdateTransactions(BRWallet *wallet, const UInt256 txHashes[], size
     BRTransaction *tx;
     UInt256 hashes[txCount];
     int needsUpdate = 0;
-    size_t i, j;
+    size_t i, j, k;
     
     assert(wallet != NULL);
     assert(txHashes != NULL || txCount == 0);
@@ -949,6 +987,13 @@ void BRWalletUpdateTransactions(BRWallet *wallet, const UInt256 txHashes[], size
         tx->blockHeight = blockHeight;
         
         if (_BRWalletContainsTx(wallet, tx)) {
+            for (k = array_count(wallet->transactions); k > 0; k--) { // remove and re-insert tx to keep wallet sorted
+                if (! BRTransactionEq(wallet->transactions[k - 1], tx)) continue;
+                array_rm(wallet->transactions, k - 1);
+                _BRWalletInsertTx(wallet, tx);
+                break;
+            }
+            
             hashes[j++] = txHashes[i];
             if (BRSetContains(wallet->pendingTx, tx) || BRSetContains(wallet->invalidTx, tx)) needsUpdate = 1;
         }

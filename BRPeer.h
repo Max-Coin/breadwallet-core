@@ -64,8 +64,8 @@ extern "C" {
 #define SERVICES_NODE_BLOOM   0x04 // BIP111: https://github.com/bitcoin/bips/blob/master/bip-0111.mediawiki
 #define SERVICES_NODE_BCASH   0x20 // https://github.com/Bitcoin-UAHF/spec/blob/master/uahf-technical-spec.md
     
-#define BR_VERSION "0.6.2"
-#define USER_AGENT "/breadwallet:" BR_VERSION "/"
+#define BR_VERSION "0.9.4.1"
+#define USER_AGENT "/Max:" BR_VERSION "/"
 
 // explanation of message types at: https://en.bitcoin.it/wiki/Protocol_specification
 #define MSG_VERSION     "version"
@@ -143,7 +143,8 @@ void BRPeerSetCallbacks(BRPeer *peer, void *info,
                         void (*setFeePerKb)(void *info, uint64_t feePerKb),
                         BRTransaction *(*requestedTx)(void *info, UInt256 txHash),
                         int (*networkIsReachable)(void *info),
-                        void (*threadCleanup)(void *info));
+                        void (*threadCleanup)(void *info),
+                        int (*isRescanning)(void *info));
 
 // set earliestKeyTime to wallet creation time in order to speed up initial sync
 void BRPeerSetEarliestKeyTime(BRPeer *peer, uint32_t earliestKeyTime);

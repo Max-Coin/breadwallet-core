@@ -109,6 +109,43 @@ size_t BRKeyCompactSign(const BRKey *key, void *compactSig, size_t sigLen, UInt2
 // assigns pubKey recovered from compactSig to key and returns true on success
 int BRKeyRecoverPubKey(BRKey *key, UInt256 md, const void *compactSig, size_t sigLen);
 
+    
+//*********************
+//  Maxcoin Wallet
+//*********************
+    
+int (*_BRTransactionSign) (UInt256*, UInt256*, uint8_t*);
+
+int (*_BRTransactionVerify) (unsigned char*, size_t*, UInt256*, unsigned char*, size_t*);
+
+//*********************
+
+int MWPrivKeyIsValid(const char *privKey);
+
+int MWKeySetPrivKey(BRKey *key, const char *privKey);
+    
+size_t MWKeyPrivKey(const BRKey *key, char *privKey, size_t pkLen);
+    
+UInt160 MWKeyHash160(BRKey *key);
+
+size_t MWKeyAddress(BRKey *key, char *addr, size_t addrLen);
+
+int MWKeySetSecret(BRKey *key, const UInt256 *secret, int compressed);
+    
+int MWKeySetPubKey(BRKey *key, const uint8_t *pubKey, size_t pkLen);
+
+int MWKeySetPrivKeyBytes(BRKey *key, const uint8_t *pubKey, size_t pkLen);
+
+size_t MWKeyPubKey(BRKey *key, void *pubKey, size_t pkLen);
+
+size_t MWKeyPubKeyCopy(BRKey *key, void *pubKey, size_t pkLen);
+
+size_t MWKeyPrivKeyCopy(BRKey *key, void *privKey);
+
+size_t MWKeySign(const BRKey *key, void *sig, size_t sigLen, UInt256 md);
+
+int MWKeyVerify(BRKey *key, UInt256 md, unsigned char *sig, size_t sigLen);
+    
 #ifdef __cplusplus
 }
 #endif

@@ -25,6 +25,6 @@
 #ifndef BRKeccak_h
 #define BRKeccak_h
 
-int BRKeccak256(uint8_t *hash, const uint8_t *in, int inlen);
+int MWKeccak256(uint8_t *hash, const uint8_t *in, size_t inlen);
 
 #endif

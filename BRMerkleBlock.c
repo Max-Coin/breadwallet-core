@@ -122,7 +122,7 @@ BRMerkleBlock *BRMerkleBlockParse(const uint8_t *buf, size_t bufLen)
             if (block->flags) memcpy(block->flags, &buf[off], len);
         }
         
-        BRSHA256_2(&block->blockHash, buf, 80);
+        MWKeccak256(block->blockHash.u8, buf, 80);
     }
     
     return block;
